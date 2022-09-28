@@ -126,15 +126,12 @@ def ReductionBlock(
     activation="relu",
     kernel_initializer="glorot_normal",
 ):
-    """Extract patches from a tf.Layer. Only channel last format allowed."""
-    track1 = tf.keras.layers.AveragePooling2D(padding="same")(layer_input)
+    track1 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=1, padding="same", strides=(1, 1), activation=activation, kernel_initializer=kernel_initializer)(layer_input)
+    track1 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=3, padding="same", strides=(2, 2), activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(track1)
+    track1 = tf.keras.layers.BatchNormalization()(track1)
+    track1 = tf.keras.layers.Activation(activation)(track1)
 
-    track2 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=1, padding="same", strides=(1, 1), activation=activation, kernel_initializer=kernel_initializer)(layer_input)
-    track2 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=3, padding="same", strides=(2, 2), activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(track2)
-    track2 = tf.keras.layers.BatchNormalization()(track2)
-    track2 = tf.keras.layers.Activation(activation)(track2)
-
-    return tf.keras.layers.Add()([track1, track2])
+    return track1
 
 def ExpansionBlock(
     layer_input,
