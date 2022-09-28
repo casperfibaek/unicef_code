@@ -1,8 +1,8 @@
 import numpy as np
 import tensorflow as tf
-import numpy as np
-from contextlib import redirect_stdout
 from utils import SaveBestModel, OverfitProtection, ConvBlock, ReductionBlock, ExpansionBlock
+from contextlib import redirect_stdout
+
 
 MODEL_FOLDER = "./models/"
 MODEL_NAME = "S2Super"
@@ -13,20 +13,28 @@ LOG_DIR = "./logs/"
 TRAIN_DATASET = "./small_dataset.npz"
 TEST_SIZE = 0.2
 TEST = True
+SAVE_INFORMATION = True
 
 BASE_LR = 1e-4
 VAL_BS = 256
 ALPHA = 0.2
+BETA = 0.1
 
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
 # Confidence-loss by Alistair Francis
-def construct_conf_loss(alpha):
+def construct_conf_loss(alpha, beta):
     def conf_loss(true, pred_and_conf):
         pred, conf = tf.split(pred_and_conf, 2, axis=-1)
 
-        numerator = tf.math.abs(tf.math.subtract(true, pred)) # MAE
+        # numerator = tf.math.abs(tf.math.subtract(true, pred)) # MAE
+        numerator = tf.math.divide(tf.math.abs(tf.math.subtract(true, pred)), tf.math.abs(true) + beta) # BETA MAPE
         # numerator = tf.math.pow(tf.math.subtract(true, pred), 2.0) # MSE
         # numerator = tf.math.abs(tf.math.divide((tf.math.subtract(true, pred)), true)) # MAPE
+        # log_true = tf.math.log(tf.math.add(true, 1.0))
+        # log_pred = tf.math.log(tf.math.add(pred, 1.0))
+        # log_diff = tf.math.subtract(log_true, log_pred)
+        # numerator = tf.math.pow(log_diff, 2) # MSLE
 
         denominator = 1.0 - conf
         loss_pixels = alpha * denominator + tf.math.divide(numerator, denominator)
@@ -167,31 +175,13 @@ else:
 
 model_superres.compile(
     optimizer=tf.optimizers.Adam(learning_rate=BASE_LR),
-    loss=construct_conf_loss(ALPHA),
+    loss=construct_conf_loss(ALPHA, BETA),
+    jit_compile=True,
     metrics=[
         wrap_metric_ignoring_conf(tf.keras.metrics.mean_absolute_error, 'MAE'),
         wrap_metric_ignoring_conf(tf.keras.metrics.mean_squared_error, 'MSE'),
     ],
 )
-
-# Save model information
-tf.keras.utils.plot_model(
-    model_superres,
-    to_file=f"./{MODEL_NAME}_{MODEL_VERSION}.png",
-    show_shapes=False,
-    show_dtype=False,
-    show_layer_names=True,
-    rankdir='LR',
-    expand_nested=False,
-    dpi=96,
-    layer_range=None,
-    show_layer_activations=False
-)
-
-with open(f"./{MODEL_NAME}_{MODEL_VERSION}.txt", "w") as f:
-    with redirect_stdout(f):
-        model_superres.summary()
-
 
 if TEST:
     loaded = np.load(TRAIN_DATASET)
@@ -209,17 +199,12 @@ else:
     low = loaded["nir_lr"]
     label = loaded["nir"]
 
-    random_shuffle = np.random.permutation(len(label))
+    random_shuffle = np.random.permutation(label.shape[0])
     label = label[random_shuffle]
     rgb = rgb[random_shuffle]
     low = low[random_shuffle]
 
-    limit = 50000
-    label = label[:limit]
-    rgb = rgb[:limit]
-    low = low[:limit]
-
-    split_frac = int(rgb.shape[0] * 0.2)
+    split_frac = int(rgb.shape[0] * TEST_SIZE)
     x_train_low = low[:-split_frac]
     x_train_rgb = rgb[:-split_frac]
     y_train = label[:-split_frac]
@@ -230,13 +215,18 @@ else:
 
 label = None; rgb = None; low = None; loaded = None
 
+# The generators are necessary to prevent tensorflow from crashing due to memory errors.
 def batch_generator_train(batchsize):
     global x_train_low, x_train_rgb, y_train
     patches_len = y_train.shape[0]
     idx = 0
 
     while True:
-        yield [x_train_low[idx:idx + batchsize], x_train_rgb[idx:idx + batchsize]], y_train[idx:idx + batchsize]
+        yield [
+            x_train_low[idx:idx + batchsize],
+            x_train_rgb[idx:idx + batchsize],
+        ], y_train[idx:idx + batchsize]
+
         idx = idx + batchsize
 
         if idx + batchsize > patches_len:
@@ -248,11 +238,35 @@ def batch_generator_test(batchsize):
     idx = 0
 
     while True:
-        yield [x_test_low[idx:idx + batchsize], x_test_rgb[idx:idx + batchsize]], y_test[idx:idx + batchsize]
+        yield [
+            x_test_low[idx:idx + batchsize],
+            x_test_rgb[idx:idx + batchsize],
+        ], y_test[idx:idx + batchsize]
+
         idx = idx + batchsize
 
         if idx + batchsize > patches_len:
             idx = 0
+
+
+# Save model information
+if SAVE_INFORMATION:
+    tf.keras.utils.plot_model(
+        model_superres,
+        to_file=f"./{MODEL_NAME}_{MODEL_VERSION}_plot.png",
+        show_shapes=False,
+        show_dtype=False,
+        show_layer_names=True,
+        rankdir='LR',
+        expand_nested=False,
+        dpi=96,
+        layer_range=None,
+        show_layer_activations=False
+    )
+
+    with open(f"./{MODEL_NAME}_{MODEL_VERSION}_summary.txt", "w") as f:
+        with redirect_stdout(f):
+            model_superres.summary(line_length=120)
 
 fits = [
     { "epochs": 10, "bs": 16,  "lr": BASE_LR},
@@ -282,6 +296,12 @@ save_best_model = SaveBestModel(save_best_metric="val_loss", initial_weights=mod
 
 out_epoch_path = None
 for idx, fit in enumerate(range(len(fits))):
+
+    random_shuffle = np.random.permutation(y_train.shape[0])
+    x_train_low = low[random_shuffle]
+    x_train_rgb = rgb[random_shuffle]
+    y_train = label[random_shuffle]
+
     use_epoch = fits[fit]["epochs"]
     use_bs = fits[fit]["bs"]
     use_lr = fits[fit]["lr"]
@@ -306,8 +326,8 @@ for idx, fit in enumerate(range(len(fits))):
             save_best_model,
             OverfitProtection(
                 patience=3,
-                difference=0.20, # 20% overfit allowed
-                offset_start=3, # disregard overfit for the first epoch
+                difference=0.20,
+                offset_start=3,
             ),
             tf.keras.callbacks.TensorBoard(log_dir=LOG_DIR),
         ],
@@ -321,6 +341,6 @@ for idx, fit in enumerate(range(len(fits))):
         steps=int(y_test.shape[0] / VAL_BS),
     )
 
-    model_superres.save(f"{MODEL_FOLDER}{MODEL_NAME}_v{MODEL_VERSION}_{str(idx)}")
+    model_superres.save(f"{MODEL_FOLDER}{MODEL_NAME}_v{MODEL_VERSION}_f{str(idx)}")
 
 model_superres.save(f"{MODEL_FOLDER}{MODEL_NAME}_v{MODEL_VERSION}")
