@@ -4,42 +4,46 @@ from utils import SaveBestModel, OverfitProtection, ConvBlock, ReductionBlock, E
 from contextlib import redirect_stdout
 
 
-MODEL_FOLDER = "./models/"
-MODEL_NAME = "S2Super"
-MODEL_VERSION = 1
-MODEL_BASE = None
+MODEL_FOLDER = "D:/CFI/models/"
+MODEL_NAME = "s2super"
+MODEL_VERSION = 4
+MODEL_BASE = "s2super_v3"
 
-LOG_DIR = "./logs/"
-TRAIN_DATASET = "./small_dataset.npz"
-TEST_SIZE = 0.2
-TEST = True
-SAVE_INFORMATION = True
+LOG_DIR = "D:/CFI/logs/"
+TRAIN_DATASET = "D:/CFI/data/train_superres.npz"
+# TRAIN_DATASET = "./small_trainingset.npz"
+TEST = False
+TEST_SIZE = 0.1
+SAVE_INFORMATION = False
 
 BASE_LR = 1e-4
 VAL_BS = 256
 ALPHA = 0.2
-BETA = 0.1
+BETA = 0.01
 
-tf.keras.mixed_precision.set_global_policy("mixed_float16")
+EPSILON = 1.19e-07 # single precision flat epsilon
+# EPSILON = 9.77e-04 # half precision float epsilon
 
 # Confidence-loss by Alistair Francis
 def construct_conf_loss(alpha, beta):
     def conf_loss(true, pred_and_conf):
         pred, conf = tf.split(pred_and_conf, 2, axis=-1)
 
-        # numerator = tf.math.abs(tf.math.subtract(true, pred)) # MAE
-        numerator = tf.math.divide(tf.math.abs(tf.math.subtract(true, pred)), tf.math.abs(true) + beta) # BETA MAPE
-        # numerator = tf.math.pow(tf.math.subtract(true, pred), 2.0) # MSE
-        # numerator = tf.math.abs(tf.math.divide((tf.math.subtract(true, pred)), true)) # MAPE
-        # log_true = tf.math.log(tf.math.add(true, 1.0))
-        # log_pred = tf.math.log(tf.math.add(pred, 1.0))
-        # log_diff = tf.math.subtract(log_true, log_pred)
-        # numerator = tf.math.pow(log_diff, 2) # MSLE
+        denom = tf.math.maximum(1.0 - conf, EPSILON)
 
-        denominator = 1.0 - conf
-        loss_pixels = alpha * denominator + tf.math.divide(numerator, denominator)
+        base = alpha * denom
 
-        return tf.math.reduce_mean(loss_pixels)
+        num_top = tf.math.add(tf.math.abs(tf.subtract(true, pred)), beta)
+        num_bot = tf.math.add(tf.math.abs(true), beta)
+        numerator = tf.math.divide(num_top, num_bot) # beta mape
+        # numerator = tf.math.abs(true - pred) # mae
+
+        # abs_dif = tf.math.abs(true - pred)
+        # beta_mape = tf.math.divide(abs_dif + beta, true + beta)
+
+        # return tf.math.reduce_mean(beta_mape)
+
+        return tf.math.reduce_mean(base + tf.math.divide(numerator, denom)) # beta mape
 
     conf_loss.__name__ = "conf_loss"
 
@@ -52,6 +56,17 @@ def wrap_metric_ignoring_conf(metric, name):
         pred, _conf = tf.split(pred_and_conf, 2, axis=-1)
 
         return metric(true, pred)
+
+    metric_func.__name__ = name
+
+    return metric_func
+
+
+def wrap_metric_ignoring_pred(metric, name):
+    def metric_func(_true, pred_and_conf):
+        _pred, conf = tf.split(pred_and_conf, 2, axis=-1)
+
+        return metric(conf)
 
     metric_func.__name__ = name
 
@@ -73,15 +88,13 @@ def create_model(
     SIZE_MEDIUM = size
     SIZE_LARGE = size + SIZE_SMALL
 
-    epsilon = tf.keras.backend.epsilon()
-
     model_input_low = tf.keras.Input(shape=(input_shape_low), name=f"{name}_input_low")
     model_input_rgb = tf.keras.Input(shape=(input_shape_rgb), name=f"{name}_input_rgb")
 
     # The idea here being: Improve the generalisability of the model by transposing the target band to the RGB bands.
     mean_rgb = tf.math.reduce_mean(tf.reduce_mean(model_input_rgb, axis=-1, keepdims=True), name="mean_rgb")
     mean_low = tf.math.reduce_mean(model_input_low, name="mean_low")
-    mean_dif = tf.math.divide(mean_rgb, tf.math.maximum(mean_low, epsilon), name="mean_dif")
+    mean_dif = tf.math.divide(mean_rgb, tf.math.maximum(mean_low, EPSILON), name="mean_dif")
     low_norm = tf.math.multiply(model_input_low, mean_dif, name="low_norm")
 
     # Pre-merge LOW
@@ -131,7 +144,7 @@ def create_model(
     )(conv_main)
 
     mean_pred = tf.math.reduce_mean(main_output, name="mean_pred")
-    mean_dif_out = tf.math.divide(mean_low, tf.math.maximum(mean_pred, epsilon), name="mean_dif_out")
+    mean_dif_out = tf.math.divide(mean_low, tf.math.maximum(mean_pred, EPSILON), name="mean_dif_out")
     out_norm = tf.math.multiply(main_output, mean_dif_out, name="main_output")
 
     # Conf Branch
@@ -147,8 +160,6 @@ def create_model(
         dtype="float32",
     )(conv_conf)
 
-    conf_output = tf.clip_by_value(conf_output, clip_value_min=epsilon, clip_value_max=1.0 - epsilon, name="main_output_conf")
-
     # Merge outputs
     concatenated_outputs = tf.keras.layers.Concatenate(axis=-1)([out_norm, conf_output])
 
@@ -159,27 +170,33 @@ def create_model(
 
     return model
 
+# model_superres = create_model(
+#     (64, 64, 1),
+#     (64, 64, 3),
+#     activation="relu",
+#     activation_output="relu",
+#     kernel_initializer="glorot_uniform",
+#     name=f"{MODEL_NAME}_v{MODEL_VERSION}",
+#     size=64,
+#     depth=2,
+# )
+
 if MODEL_BASE is not None:
-    model_superres = tf.keras.models.load_model(MODEL_FOLDER + MODEL_BASE)
-else:
-    model_superres = create_model(
-        (64, 64, 1),
-        (64, 64, 3),
-        activation="relu",
-        activation_output="relu",
-        kernel_initializer="glorot_uniform",
-        name=f"{MODEL_NAME}_v{MODEL_VERSION}",
-        size=64,
-        depth=2,
-    )
+    # model_superres_base = tf.keras.models.load_model(MODEL_FOLDER + MODEL_BASE, compile=False)
+    # model_superres.set_weights(model_superres_base.get_weights())
+    # model_superres_base = None
+    model_superres = tf.keras.models.load_model(MODEL_FOLDER + MODEL_BASE, compile=False)
 
 model_superres.compile(
     optimizer=tf.optimizers.Adam(learning_rate=BASE_LR),
     loss=construct_conf_loss(ALPHA, BETA),
-    jit_compile=True,
     metrics=[
         wrap_metric_ignoring_conf(tf.keras.metrics.mean_absolute_error, 'MAE'),
         wrap_metric_ignoring_conf(tf.keras.metrics.mean_squared_error, 'MSE'),
+        wrap_metric_ignoring_conf(tf.keras.metrics.mean_absolute_percentage_error, 'MAPE'),
+        wrap_metric_ignoring_pred(lambda x: tf.math.reduce_min(x), "conf_min"),
+        wrap_metric_ignoring_pred(lambda x: tf.math.reduce_max(x), "conf_max"),
+        wrap_metric_ignoring_pred(lambda x: tf.math.reduce_mean(x), "conf_avg"),
     ],
 )
 
@@ -191,7 +208,7 @@ if TEST:
 
     x_test_low = loaded['x_test_low']
     x_test_rgb = loaded['x_test_rgb']
-    y_test = loaded['x_test'] # Mistake in dataset
+    y_test = loaded['y_test']
 
 else:
     loaded = np.load(TRAIN_DATASET)
@@ -269,15 +286,15 @@ if SAVE_INFORMATION:
             model_superres.summary(line_length=120)
 
 fits = [
-    { "epochs": 10, "bs": 16,  "lr": BASE_LR},
-    { "epochs":  5, "bs": 32,  "lr": BASE_LR},
-    { "epochs":  3, "bs": 64,  "lr": BASE_LR},
-    { "epochs":  3, "bs": 96,  "lr": BASE_LR},
-    { "epochs":  3, "bs": 128, "lr": BASE_LR},
-    { "epochs":  3, "bs": 64,  "lr": BASE_LR * 0.1},
-    { "epochs":  3, "bs": 140, "lr": BASE_LR * 0.1},
-    { "epochs":  3, "bs": 64,  "lr": BASE_LR * 0.01},
-    { "epochs":  3, "bs": 140, "lr": BASE_LR * 0.01},
+    { "epochs": 10, "bs": 140, "lr": BASE_LR * 0.1},
+    # { "epochs": 10, "bs": 16,  "lr": BASE_LR},
+    # { "epochs":  5, "bs": 32,  "lr": BASE_LR},
+    # { "epochs":  3, "bs": 64,  "lr": BASE_LR},
+    # { "epochs":  3, "bs": 96,  "lr": BASE_LR},
+    # { "epochs":  3, "bs": 128, "lr": BASE_LR},
+    # { "epochs":  3, "bs": 140, "lr": BASE_LR},    
+    # { "epochs":  3, "bs": 140, "lr": BASE_LR * 0.1},
+    # { "epochs":  3, "bs": 140, "lr": BASE_LR * 0.01},
 ]
 
 cur_sum = 0
@@ -291,16 +308,17 @@ val_loss = model_superres.evaluate(
     steps=int(y_test.shape[0] / VAL_BS),
 )
 
-best_val_loss = val_loss
+# best_val_loss = val_loss
 save_best_model = SaveBestModel(save_best_metric="val_loss", initial_weights=model_superres.get_weights())
 
 out_epoch_path = None
 for idx, fit in enumerate(range(len(fits))):
 
-    random_shuffle = np.random.permutation(y_train.shape[0])
-    x_train_low = low[random_shuffle]
-    x_train_rgb = rgb[random_shuffle]
-    y_train = label[random_shuffle]
+    if idx > 0:
+        random_shuffle = np.random.permutation(y_train.shape[0])
+        x_train_low = x_train_low[random_shuffle]
+        x_train_rgb = x_train_rgb[random_shuffle]
+        y_train = y_train[random_shuffle]
 
     use_epoch = fits[fit]["epochs"]
     use_bs = fits[fit]["bs"]
@@ -335,12 +353,14 @@ for idx, fit in enumerate(range(len(fits))):
 
     model_superres.set_weights(save_best_model.best_weights)
 
-    best_val_loss = model_superres.evaluate(
-        batch_generator_test(VAL_BS),
-        batch_size=VAL_BS,
-        steps=int(y_test.shape[0] / VAL_BS),
-    )
+    # best_val_loss = model_superres.evaluate(
+    #     batch_generator_test(VAL_BS),
+    #     batch_size=VAL_BS,
+    #     steps=int(y_test.shape[0] / VAL_BS),
+    # )
 
     model_superres.save(f"{MODEL_FOLDER}{MODEL_NAME}_v{MODEL_VERSION}_f{str(idx)}")
+
+    print(f"Completed: {use_epoch + use_ie}/{cur_sum}")
 
 model_superres.save(f"{MODEL_FOLDER}{MODEL_NAME}_v{MODEL_VERSION}")
