@@ -1,32 +1,9 @@
 import tensorflow as tf
-
-class SaveBestModel(tf.keras.callbacks.Callback):
-    def __init__(self, save_best_metric="val_loss", this_max=False, initial_weights=None):
-        self.save_best_metric = save_best_metric
-        self.max = this_max
-
-        if initial_weights is not None:
-            self.best_weights = initial_weights
-
-        if this_max:
-            self.best = float("-inf")
-        else:
-            self.best = float("inf")
-
-    def on_epoch_end(self, _epoch, logs=None):
-        metric_value = abs(logs[self.save_best_metric])
-        if self.max:
-            if metric_value > self.best:
-                self.best = metric_value
-                self.best_weights = self.model.get_weights()
-
-        else:
-            if metric_value < self.best:
-                self.best = metric_value
-                self.best_weights = self.model.get_weights()
+import numpy as np
 
 
 class OverfitProtection(tf.keras.callbacks.Callback):
+    """ A callback to prevent overfitting in models. """
     def __init__(self, difference=0.1, patience=3, offset_start=3, verbose=True):
         self.difference = difference
         self.patience = patience
@@ -60,66 +37,117 @@ class OverfitProtection(tf.keras.callbacks.Callback):
                 print(f"Training stopped to prevent overfitting. Difference: {ratio}, Patience: {self.count}/{self.patience}")
 
 
-def ingest_sentinel2(arr):
-    limit = 55535.0
-    scale = 10000.0
-    arr_cast = tf.cast(arr, tf.float32)
-    scaled = tf.divide(arr_cast, scale)
+def s2compress(arr, scale=10000.0):
+    """ Compresses the values of an s2-array to a range of 0-2. """
+    scaled = arr / scale
+    limit = 65535.0 - scale
 
-    top = tf.add(tf.multiply(0.8, tf.pow(scaled, 2)), tf.multiply(1.8, scaled))
-    bot = tf.add(1.0, tf.divide(tf.subtract(arr_cast, scale), limit))
+    bot = 1.0 + ((arr - scale) / limit)
 
-    return tf.where(arr_cast >= scale, bot, top)
+    return np.where(arr >= scale, bot, scaled).astype("float32")
 
 
-def parse_sentinel2(arr):
-    scale = 10000.0
-    sqrt_term = tf.subtract(81.0, (tf.multiply(80, arr)))
-    sqrt = tf.sqrt(tf.where(sqrt_term > 0.0, sqrt_term, 0.0))
+def s2compress_reverse(arr, scale=10000.0):
+    top = arr * scale
+    bot = 5.0 * ((11107.0 * arr) - 9107.0)
+
+    return np.where(arr >= 1.0, bot, top)
+
+
+def binary_metric():
+    """ Returns a function that calculates the binary accuracy of a model. """
+
+    def _binary_metric(y_true, y_pred):
+        return tf.keras.metrics.binary_accuracy(y_true, y_pred, threshold=0.01)
+
+    _binary_metric.__name__ = "b_acc"
+
+    return _binary_metric
+
+
+def f1_loss(y_true, y_pred):
+    """Compute the macro soft F1-score as a cost (average 1 - soft-F1 across all labels).
+    Use probability values instead of binary predictions.
+    This version uses the computation of soft-F1 for both positive and negative class for each label.
     
-    top = tf.subtract(1.125, (tf.multiply(0.125, sqrt))) * scale
-    bot = tf.multiply(5.0, tf.subtract(tf.multiply(11107.0, arr), 9107.0))
+    Args:
+        y (int32 Tensor): targets array of shape (BATCH_SIZE, N_LABELS)
+        y_hat (float32 Tensor): probability matrix from forward propagation of shape (BATCH_SIZE, N_LABELS)
+        
+    Returns:
+        cost (scalar Tensor): value of the cost function for the batch
+    """
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
 
-    return tf.where(arr >= 1.0, bot, top)
+    tp = tf.reduce_sum(y_pred * y_true, axis=0)
+    fp = tf.reduce_sum(y_pred * (1 - y_true), axis=0)
+
+    fn = tf.reduce_sum((1 - y_pred) * y_true, axis=0)
+    tn = tf.reduce_sum((1 - y_pred) * (1 - y_true), axis=0)
+
+    soft_f1_class1 = (2 * tp) / (2*tp + fn + fp + 1e-16)
+    soft_f1_class0 = (2 * tn) / (2*tn + fn + fp + 1e-16)
+
+    cost_class1 = 1 - soft_f1_class1 # reduce 1 - soft-f1_class1 in order to increase soft-f1 on class 1
+    cost_class0 = 1 - soft_f1_class0 # reduce 1 - soft-f1_class0 in order to increase soft-f1 on class 0
+    cost = 0.5 * (cost_class1 + cost_class0) # take into account both class 1 and class 0
+
+    macro_cost = tf.reduce_mean(cost) # average on all labels
+
+    return macro_cost
 
 
-def divide_filters(size, width):
-    if width > size:
-        raise ValueError("Wider than size.")
-    
-    step = int(size / width)
-    missing = size - (width * step)
+def struct_mape_metric(beta=0.01):
+    """ Returns a function that calculates the MAPE accuracy of building predictions, while ignoring the zero values. """
+    def _struct_mape_metric(y_true, y_pred):
+        y_true = tf.reshape(y_true, [-1])
+        y_pred = tf.reshape(y_pred, [-1])
 
-    batches = [step] * width
+        mask = tf.logical_or(y_true <= 0.0, y_pred <= 0.0)
 
-    for idx in range(0, missing):
-        batches[idx] += 1
+        if tf.reduce_sum(tf.cast(mask, tf.int32)) == 0:
+            return 0.0
 
-    return batches
+        num_top = tf.math.abs(tf.subtract(y_true, y_pred))
+        num_bot = tf.math.add(tf.math.abs(y_true), beta)
+        mape = tf.math.divide(num_top, num_bot) # beta mape
+
+        masked = tf.boolean_mask(mape, mask)
+
+        return tf.reduce_mean(masked)
+
+    _struct_mape_metric.__name__ = "s_mape"
+
+    return _struct_mape_metric
 
 
-def ConvBlockBase(input_layer, size, cardinality=8, residual=False, activation="relu", kernel_initializer="glorot_normal"):
+def beta_mape_loss(beta=0.01):
+    def _mape_metric(y_true, y_pred):
+        mape = tf.reduce_mean(tf.abs((y_true - y_pred) / (y_true + beta)))
+
+        return mape
+
+    _mape_metric.__name__ = "b_mape"
+
+    return _mape_metric
+
+
+def InceptionConvBlock(input_layer, size, residual=False, activation="relu", kernel_initializer="glorot_normal"):
+    """ Creates a convolutional block with a given number of layers. """
     if residual:
         size = input_layer.shape[-1]
 
-    to_concatenate = []
+    conv1 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+    conv1 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv1)
 
-    for _ in range(cardinality):
-        conv1 = tf.keras.layers.Conv2D(size // cardinality, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
-        conv1 = tf.keras.layers.Conv2D(size // cardinality, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv1)
+    conv2 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+    conv2 = tf.keras.layers.Conv2D(size, 3, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv2)
 
-        conv2 = tf.keras.layers.Conv2D(size // cardinality, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
-        conv2 = tf.keras.layers.Conv2D(size // cardinality, 3, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv2)
+    conv3 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+    conv3 = tf.keras.layers.Conv2D(size, 5, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv3)
 
-        conv3 = tf.keras.layers.Conv2D(size // cardinality, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
-        conv3 = tf.keras.layers.Conv2D(size // cardinality, 5, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv3)
-
-        merged_block = tf.keras.layers.Add()([conv1, conv2, conv3])
-        
-        to_concatenate.append(merged_block)
-
-    merged = tf.keras.layers.Concatenate()(to_concatenate)
-    merged = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(merged)
+    merged = tf.keras.layers.Add()([conv1, conv2, conv3])
     merged = tf.keras.layers.BatchNormalization()(merged)
     merged = tf.keras.layers.Activation(activation)(merged)
 
@@ -129,50 +157,61 @@ def ConvBlockBase(input_layer, size, cardinality=8, residual=False, activation="
     return merged
 
 
-def ConvBlock(input_layer, size, depth=1, width=1, residual=False, activation="relu", kernel_initializer="glorot_normal"):
-    
-    wide_layers = []
-
-    sizes = divide_filters(size, width)
-
-    if residual:
-        wide_layers.append(input_layer)
-
-    for w in range(0, width):
-        previous_depth = input_layer
-
-        for _ in range(0, depth):
-            previous_depth = ConvBlockBase(previous_depth, sizes[w], residual=residual, activation=activation, kernel_initializer=kernel_initializer)
-
-        wide_layers.append(previous_depth)
-
-    if len(wide_layers) > 1:
-        if residual:
-            return tf.keras.layers.Add()(wide_layers)
-        else:
-            return tf.keras.layers.Concatenate()(wide_layers)
-    
-    return wide_layers[0]
-
-
-def SqueezeBlock(layer_input, channels, ratio=8):
-    squeeze = tf.keras.layers.GlobalAveragePooling2D()(layer_input)
-    excitation = tf.keras.layers.Dense(channels // ratio, activation='relu')(squeeze)
-    excitation = tf.keras.layers.Dense(channels, activation='sigmoid')(excitation)
-    # excitation = tf.keras.layers.Reshape([1, 1, channels])(excitation)
-
-    return tf.keras.layers.Multiply()([layer_input, excitation])
-
-
-def ReductionBlock(
-    layer_input,
+def ResNextConvBlock(
+    input_layer,
+    filters,
+    kernel_size=3,
+    cardinality=8,
+    residual=False,
     activation="relu",
     kernel_initializer="glorot_normal",
 ):
-    track1 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=1, padding="same", strides=(1, 1), activation=activation, kernel_initializer=kernel_initializer)(layer_input)
-    track1 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=3, padding="same", strides=(2, 2), activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(track1)
-    track1 = tf.keras.layers.BatchNormalization()(track1)
-    track1 = tf.keras.layers.Activation(activation)(track1)
+    """ Creates a convolutional block with a given number of layers. """
+    if residual:
+        filters = input_layer.shape[-1]
+
+    to_concatenate = []
+
+    width = filters // cardinality
+
+    for _ in range(cardinality):
+        conv = tf.keras.layers.Conv2D(width, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+        conv = tf.keras.layers.Conv2D(width, kernel_size, padding="same", activation=activation, kernel_initializer=kernel_initializer)(conv)
+        
+        to_concatenate.append(conv)
+
+    merged = tf.keras.layers.Concatenate()(to_concatenate)
+    merged = tf.keras.layers.Conv2D(filters, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(merged)
+
+    if residual:
+        return tf.keras.layers.Add()([input_layer, merged])
+
+    return merged
+
+
+def SqueezeBlock(
+    layer_input,
+    ratio=8,
+):
+    """ Creates a squeeze block. """
+    batch_size, _, _, channels = layer_input.shape
+    squeeze = tf.keras.layers.GlobalAveragePooling2D()(layer_input)
+    excitation = tf.keras.layers.Dense(channels // ratio, activation="relu", use_bias=False)(squeeze)
+    excitation = tf.keras.layers.Dense(channels, activation="sigmoid", use_bias=False)(excitation)
+    excitation = tf.reshape(excitation, [-1, 1, 1, channels])
+    excitation = tf.keras.layers.Multiply()([layer_input, excitation])
+
+    return excitation
+
+def ReductionBlock(
+    layer_input,
+):
+    """ Reduction Block for S2Pop-net. """
+    track1 = tf.keras.layers.MaxPool2D(
+        pool_size=(2, 2),
+        strides=(2, 2),
+        padding="same",
+    )(layer_input)
 
     return track1
 
@@ -183,9 +222,56 @@ def ExpansionBlock(
     kernel_size=3,
     kernel_initializer="glorot_normal",
 ):
-    track1 = tf.keras.layers.Conv2D(layer_input.shape[-1], kernel_size=1, padding="same", strides=(1, 1), activation=activation, kernel_initializer=kernel_initializer)(layer_input)
-    track1 = tf.keras.layers.Conv2DTranspose(layer_input.shape[-1], kernel_size=kernel_size, strides=(2, 2), activation=activation, padding="same", kernel_initializer=kernel_initializer, use_bias=False)(track1)
-    track1 = tf.keras.layers.BatchNormalization()(track1)
-    track1 = tf.keras.layers.Activation(activation)(track1)
+    """ Expansion block for S2Pop-net. """
+    track1 = tf.keras.layers.Conv2DTranspose(
+        layer_input.shape[-1],
+        kernel_size=kernel_size,
+        strides=(2, 2),
+        activation=activation,
+        padding="same",
+        kernel_initializer=kernel_initializer,
+    )(layer_input)
 
     return track1
+
+
+def linear_fits(fits):
+    """ Linearly interpolates between the given fits. """
+    _fits = [x for x in fits]
+
+    cur_sum = 0
+    for idx, val in enumerate(_fits):
+        if (idx + 1) > len(_fits) - 1:
+            _fits[idx]["next_bs"] = _fits[idx]["bs"]
+            _fits[idx]["next_lr"] = _fits[idx]["lr"]
+        else:
+            _fits[idx]["next_bs"] = _fits[idx + 1]["bs"]
+            _fits[idx]["next_lr"] = _fits[idx + 1]["lr"]
+
+        _fits[idx]["ie"] = cur_sum
+        cur_sum += _fits[idx]["epochs"]
+
+    linear = []
+    for fit in _fits:
+        steps = fit["epochs"]
+
+        bs_start = fit["bs"]
+        bs_end = fit["next_bs"]
+        bs_dif = bs_end - bs_start
+        bs_step = bs_dif / steps
+
+        lr_start = fit["lr"]
+        lr_end = fit["next_lr"]
+        lr_dif = lr_end - lr_start
+        lr_step = lr_dif / steps
+
+        for epoch in range(fit["epochs"]):
+            linear.append({
+                "epoch_current": epoch + fit["ie"],
+                "epoch_total": cur_sum,
+                "bs": np.rint(bs_start + (epoch * bs_step),).astype(int),
+                "lr": lr_start + (epoch * lr_step),
+                "last": False if (epoch + 1) != fit["epochs"] else True,
+            })
+    
+    return linear
