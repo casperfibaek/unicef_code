@@ -1,6 +1,5 @@
 import tensorflow as tf
-from utils import ResNextConvBlock, ReductionBlock, ExpansionBlock, SqueezeBlock
-
+from utils import InceptionConvBlock, ReductionBlock, ExpansionBlock, SqueezeBlock
 
 def create_model(
     input_shape,
@@ -20,22 +19,22 @@ def create_model(
     SIZE_MEDIUM = size
     SIZE_LARGE = size + SIZE_SMALL
 
+    model_input = tf.keras.Input(shape=(input_shape), name=f"{name}_input")
+
+    # Normalise input
     SCALE = 10000.0
     MAX_UINT16 = 65535.0
     LIMIT = MAX_UINT16 - SCALE
 
-    model_input = tf.keras.Input(shape=(input_shape), name=f"{name}_input")
-
-    # Normalise input
     cast_input = tf.cast(model_input, tf.float32)
     scaled_input = cast_input / SCALE
     bottom = 1.0 + ((cast_input - SCALE) / LIMIT)
     normalised_input = tf.where(cast_input >= SCALE, bottom, scaled_input)
 
     # Outer-block
-    conv_skip_64 = ResNextConvBlock(normalised_input, filters=SIZE_SMALL, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer); conv = conv_skip_64
+    conv_skip_64 = InceptionConvBlock(normalised_input, filters=SIZE_SMALL, residual=False, activation=activation, kernel_initializer=kernel_initializer); conv = conv_skip_64
     for _ in range(depth):
-        conv = ResNextConvBlock(conv, filters=SIZE_SMALL, cardinality=cardinality, residual=True, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(conv, filters=SIZE_SMALL, residual=True, activation=activation, kernel_initializer=kernel_initializer)
 
     if squeeze:
         conv = SqueezeBlock(conv, ratio=squeeze_ratio)
@@ -43,10 +42,10 @@ def create_model(
     redu = ReductionBlock(conv)
 
     # 32 x 32
-    conv_skip_32 = ResNextConvBlock(redu, filters=SIZE_MEDIUM, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer); conv = conv_skip_32
+    conv_skip_32 = InceptionConvBlock(redu, filters=SIZE_MEDIUM, residual=False, activation=activation, kernel_initializer=kernel_initializer); conv = conv_skip_32
 
     for _ in range(depth):
-        conv = ResNextConvBlock(conv, filters=SIZE_MEDIUM, cardinality=cardinality, residual=True, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(conv, filters=SIZE_MEDIUM, residual=True, activation=activation, kernel_initializer=kernel_initializer)
     
     if squeeze:
         conv = SqueezeBlock(conv, ratio=squeeze_ratio)
@@ -54,10 +53,10 @@ def create_model(
     redu = ReductionBlock(redu)
 
     # 16 x 16
-    conv_skip_16 = ResNextConvBlock(redu, filters=SIZE_LARGE, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer); conv = conv_skip_16
+    conv_skip_16 = InceptionConvBlock(redu, filters=SIZE_LARGE, residual=False, activation=activation, kernel_initializer=kernel_initializer); conv = conv_skip_16
     
     for _ in range(depth):
-        conv = ResNextConvBlock(conv, filters=SIZE_LARGE, cardinality=cardinality, residual=True, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(conv, filters=SIZE_LARGE, residual=True, activation=activation, kernel_initializer=kernel_initializer)
 
     if squeeze:
         conv = SqueezeBlock(conv, ratio=squeeze_ratio)
@@ -66,12 +65,11 @@ def create_model(
 
     # 8 x 8
     if dense_core:
-        size = 8 * 8
         flatten = tf.keras.layers.Flatten()(redu)
-        dense_core = tf.keras.layers.Dense(units=size * SIZE_LARGE, activation=activation, kernel_initializer=kernel_initializer)(flatten)
+        dense_core = tf.keras.layers.Dense(units=8 * 8 * SIZE_LARGE, activation=activation, kernel_initializer=kernel_initializer)(flatten)
         conv = tf.keras.layers.Reshape((8, 8, SIZE_LARGE))(dense_core)
     else:
-        conv = ResNextConvBlock(redu, filters=SIZE_LARGE, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(redu, filters=SIZE_LARGE, residual=False, activation=activation, kernel_initializer=kernel_initializer)
 
         if squeeze:
             conv = SqueezeBlock(conv, ratio=squeeze_ratio)
@@ -81,10 +79,10 @@ def create_model(
     # 16 x 16
     merg = tf.keras.layers.Concatenate()([expa, conv_skip_16])
 
-    conv = ResNextConvBlock(merg, filters=SIZE_MEDIUM, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer)
+    conv = InceptionConvBlock(merg, filters=SIZE_MEDIUM, residual=False, activation=activation, kernel_initializer=kernel_initializer)
 
     for _ in range(depth):
-        conv = ResNextConvBlock(conv, filters=SIZE_MEDIUM, cardinality=cardinality, residual=True, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(conv, filters=SIZE_MEDIUM, residual=True, activation=activation, kernel_initializer=kernel_initializer)
 
     if squeeze:
         conv = SqueezeBlock(conv, ratio=squeeze_ratio)
@@ -94,10 +92,10 @@ def create_model(
     # 32 x 32
     merg = tf.keras.layers.Concatenate()([expa, conv_skip_32])
 
-    conv = ResNextConvBlock(merg, filters=SIZE_MEDIUM, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer)
+    conv = InceptionConvBlock(merg, filters=SIZE_MEDIUM, residual=False, activation=activation, kernel_initializer=kernel_initializer)
 
     for _ in range(depth):
-        conv = ResNextConvBlock(conv, filters=SIZE_MEDIUM, cardinality=cardinality, residual=True, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(conv, filters=SIZE_MEDIUM, residual=True, activation=activation, kernel_initializer=kernel_initializer)
     
     if squeeze:
         conv = SqueezeBlock(conv, ratio=squeeze_ratio)
@@ -108,10 +106,10 @@ def create_model(
     merg = tf.keras.layers.Concatenate()([expa, conv_skip_64])
 
     # Main branch
-    conv_main = ResNextConvBlock(merg, filters=SIZE_SMALL, cardinality=cardinality, residual=False, activation=activation, kernel_initializer=kernel_initializer)
+    conv_main = InceptionConvBlock(merg, filters=SIZE_SMALL, residual=False, activation=activation, kernel_initializer=kernel_initializer)
 
     for _ in range(depth):
-        conv = ResNextConvBlock(conv, filters=SIZE_SMALL, cardinality=cardinality, residual=True, activation=activation, kernel_initializer=kernel_initializer)
+        conv = InceptionConvBlock(conv, filters=SIZE_SMALL, residual=True, activation=activation, kernel_initializer=kernel_initializer)
 
     if squeeze:
         conv = SqueezeBlock(conv, ratio=squeeze_ratio)
