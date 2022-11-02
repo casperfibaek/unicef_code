@@ -1,4 +1,5 @@
 import os
+from turtle import color
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -7,6 +8,8 @@ from glob import glob
 from functools import cmp_to_key
 
 
+FOLDER = "C:/Users/caspe/Desktop/unicef_code/gifs/*.tif"
+DIVISIONS = 1
 
 def cmp_items(a, b):
     a_int = int(os.path.splitext(os.path.basename(a))[0].split("_")[4])
@@ -18,7 +21,7 @@ def cmp_items(a, b):
     else:
         return -1
 
-images = glob("/home/casper/Desktop/UNICEF/gifs/*.tif")
+images = glob(FOLDER)
 images.sort(key=cmp_to_key(cmp_items))
 
 arrays = []
@@ -31,26 +34,27 @@ for idx, arr in enumerate(arrays):
     if idx == 0:
         arrays_interpolated.append(arr)
     else:
-        interpolated = np.linspace(arrays[idx-1], arr, 10, axis=0)
-        for i in range(10):
+        interpolated = np.linspace(arrays[idx-1], arr, DIVISIONS, axis=0)
+        for i in range(DIVISIONS):
             arrays_interpolated.append(interpolated[i, :, :])
 
+fig, ax = plt.subplots()
 
-
-fig = plt.figure() # make figure
-
-# make axesimage object
-# the vmin and vmax here are very important to get the color map correct
 im = plt.imshow(arrays_interpolated[0], cmap=plt.get_cmap("viridis"), vmin=0.0, vmax=1.0, interpolation="nearest")
+times = np.arange(0.0, len(arrays), len(arrays) / len(arrays_interpolated), dtype="float32")
+label = ax.text(4, 4, f"{round(times[0])}", ha='left', va='top', fontsize=15, color="#BBBBBB")
 
-# function to update figure
+
 def updatefig(j):
-    # set the data in the axesimage object
     im.set_array(arrays_interpolated[j])
-    # return the artists set
-    return [im]
+    label.set_text(f"{round(times[j])}")
+
+    return [im, label]
 
 # kick off the animation
-ani = animation.FuncAnimation(fig, updatefig, frames=range(len(arrays_interpolated)), interval=50, blit=True)
+ani = animation.FuncAnimation(fig, updatefig, frames=range(len(arrays_interpolated)), interval=10, blit=True)
 
+fig.patch.set_facecolor('#22252A')
+plt.axis('off')
+plt.tight_layout()
 plt.show()
