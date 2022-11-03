@@ -18,12 +18,12 @@ def cmp_items(a, b):
     else:
         return -1
 
-def ready_image(glob_path, divisions=5):
+def ready_image(glob_path, divisions=5, limit=100):
     images = glob(glob_path)
     images.sort(key=cmp_to_key(cmp_items))
 
     arrays = []
-    for img in images:
+    for img in images[:limit]:
         img = beo.raster_to_array(img)[:, :, 0]
         arrays.append(img)
 
@@ -39,39 +39,78 @@ def ready_image(glob_path, divisions=5):
     return arrays_interpolated
 
 DIVISIONS = 10
-
-rows = 1
-cols = 1
-fig, ax = plt.subplots(nrows=rows, ncols=cols)
-# ax1, ax2 = ax
-ax1 = ax
-
-img1 = ready_image("/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v17_north-america_30_*.tif", divisions=DIVISIONS)
-img2 = ready_image("/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v17_north-america_90_*.tif", divisions=DIVISIONS)
-
-im1 = ax1.imshow(img1[0], cmap=plt.get_cmap("viridis"), vmin=0.0, vmax=1.0, interpolation="nearest"); ax1.axis("off"); ax1.set_title('San Diego', color="#BBBBBB")
-# im2 = ax2.imshow(img2[0], cmap=plt.get_cmap("viridis"), vmin=0.0, vmax=1.0, interpolation="nearest"); ax2.axis("off"); ax2.set_title('Palm Springs', color="#BBBBBB")
-
-times = np.arange(0.0, len(img1), len(img1) / len(img1), dtype="float32")
-
-def updatefig(j):
-    im1.set_array(img1[j])
-    # im2.set_array(img2[j])
-
-    return [
-        im1,
-        # im2,
-    ]
-
-DPI = 96
+DPI = 130
 HEIGHT = 1000
 WIDTH = 1000
-plt.figure(figsize=(HEIGHT / DPI, WIDTH / DPI), dpi=DPI)
-plt.tight_layout()
-fig.patch.set_facecolor('#22252A')
-anim = animation.FuncAnimation(fig, updatefig, frames=range(len(img1)), interval=50, blit=True)
+LIMIT = 51
+PRERUN = 3
+FADE = 3
+TEXT_COLOR = "#BBBBBB"
+IMG_RAMP = "magma"
 
+places = [
+    { "name": "San Diego", "name_abr": "san-diego" },
+    { "name": "Palm Springs", "name_abr": "palm-springs" },
+    { "name": "Lake Isabella", "name_abr": "lake-isabella" },
+    { "name": "Nevada Border", "name_abr": "nevada-border" },
+    { "name": "Dixon", "name_abr": "dixon" },
+    { "name": "Lake Port", "name_abr": "lake-port" },
+    { "name": "Eugene", "name_abr": "eugene" },
+    { "name": "Covelo", "name_abr": "covelo" },
+    { "name": "Homestead", "name_abr": "homestead" },
+    { "name": "Melbourne", "name_abr": "melbourne" },
+]
 
-anim.save(r"/home/casper/Desktop/UNICEF/animation_02.mp4", writer=animation.FFMpegWriter(fps=25, bitrate=25000))
+for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80", "90"]):
+    fig = plt.figure(figsize=(HEIGHT / DPI, WIDTH / DPI), dpi=DPI, frameon=False)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
 
-# plt.show()
+    rgb_image = f"/home/casper/Desktop/UNICEF/gifs/test_images/north-america_{fig_nr}.tif"
+    rgb_image = beo.raster_to_array(rgb_image)
+    rgb_image = rgb_image[:, :, 1:4] / 10000.0
+
+    q02 = np.quantile(rgb_image, 0.02)
+    q99 = np.quantile(rgb_image, 0.99)
+
+    rgb_image = np.clip(rgb_image[:, :, ::-1], q02, q99)
+    rgb_image = (rgb_image - q02) / (q99 - q02)
+
+    img1 = ready_image(f"/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v17_north-america_{fig_nr}_*.tif", divisions=DIVISIONS, limit=LIMIT)
+    preruns = [rgb_image] * DIVISIONS * PRERUN
+    
+    interpolated = np.linspace(rgb_image, np.zeros_like(rgb_image), DIVISIONS * FADE, axis=0)
+    for q in range(DIVISIONS * FADE):
+        preruns.append(interpolated[q, :, :])
+    interpolated = None
+    
+    im1 = ax.imshow(rgb_image, vmin=0.0, vmax=1.0, interpolation="antialiased")
+    times = np.arange(0, LIMIT, 1 / DIVISIONS)
+
+    time_text = ax.text(0.05, 0.05, str(round(times[0], 1)), fontsize=15, color=TEXT_COLOR, transform=ax.transAxes)
+    place_text = ax.text(0.5, 0.95, places[idx]["name"], fontsize=15, color=TEXT_COLOR, transform=ax.transAxes)
+
+    count_init = 0
+    count_pred = 0
+    def updatefig(j):
+        global count_init, count_pred
+
+        try:
+            if count_init <= len(preruns):
+                im1.set_data(preruns[j])
+                count_init += 1
+            else:
+                im1.set_cmap(IMG_RAMP)
+                im1.set_clim(vmin=0.0, vmax=1.0)
+                im1.set_data(img1[count_pred])
+                time_text.set_text(str(round(times[count_pred], 1)))
+                count_pred += 1
+        except:
+            time_text.set_text(str(len(times)))
+            pass
+
+        return [im1, time_text]
+
+    anim = animation.FuncAnimation(fig, updatefig, frames=range(len(img1) + len(preruns)), interval=30, blit=True)
+    anim.save(f"/home/casper/Desktop/UNICEF/animation_{places[idx]['name_abr']}.mp4", writer=animation.FFMpegWriter(fps=30, bitrate=1000000))

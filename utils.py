@@ -133,19 +133,19 @@ def beta_mape_loss(beta=0.01):
     return _mape_metric
 
 
-def InceptionConvBlock(input_layer, size, residual=False, activation="relu", kernel_initializer="glorot_normal"):
+def InceptionConvBlock(input_layer, filters, residual=False, activation="relu", kernel_initializer="glorot_normal"):
     """ Creates a convolutional block with a given number of layers. """
     if residual:
-        size = input_layer.shape[-1]
+        filters = input_layer.shape[-1]
 
-    conv1 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
-    conv1 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv1)
+    conv1 = tf.keras.layers.Conv2D(filters, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+    conv1 = tf.keras.layers.Conv2D(filters, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv1)
 
-    conv2 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
-    conv2 = tf.keras.layers.Conv2D(size, 3, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv2)
+    conv2 = tf.keras.layers.Conv2D(filters, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+    conv2 = tf.keras.layers.Conv2D(filters, 3, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv2)
 
-    conv3 = tf.keras.layers.Conv2D(size, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
-    conv3 = tf.keras.layers.Conv2D(size, 5, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv3)
+    conv3 = tf.keras.layers.Conv2D(filters, 1, padding="same", activation=activation, kernel_initializer=kernel_initializer)(input_layer)
+    conv3 = tf.keras.layers.Conv2D(filters, 5, padding="same", activation=activation, kernel_initializer=kernel_initializer, use_bias=False)(conv3)
 
     merged = tf.keras.layers.Add()([conv1, conv2, conv3])
     merged = tf.keras.layers.BatchNormalization()(merged)

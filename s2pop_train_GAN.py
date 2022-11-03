@@ -3,10 +3,11 @@ import numpy as np
 import buteo as beo
 import tensorflow as tf
 from glob import glob
-from utils import OverfitProtection, struct_mape_metric, create_GAN_data
+from utils import OverfitProtection, struct_mape_metric, create_GAN_data, f1_loss
 from s2pop_predict import predict
 from s2pop_model_baseline import create_model
 from s2pop_model_discriminator import create_discriminator
+from s2super.super_sample import super_sample_patches, get_s2super_model
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' # 0 = all messages are logged (default behavior), 1 = INFO messages are not printed, 2 = INFO and WARNING messages are not printed, 3 = INFO, WARNING, and ERROR messages are not printed
 tf.get_logger().setLevel("ERROR")
@@ -17,15 +18,15 @@ MODEL_FOLDER = "./models/"
 BASE_LR = 1e-4
 VAL_BS = 256
 INPUT_SHAPE = (64, 64, 10)
-ACTIVATION = "swish"
+ACTIVATION = "relu"
 ACTIVATION_OUTPUT = "relu"
 KERNEL_INITIALIZER = "glorot_uniform"
-NAME = "s2pop_gan_v15_with"
-SIZE = 64
+NAME = "s2pop_gan_v20"
+SIZE = 128
 SQUEEZE_RATIO = 8
 DENSE_CORE = True
 SQUEEZE = True
-DEPTH = 1
+DEPTH = 2
 OPTIMIZER_PRED = "adam"
 OPTIMIZER_DISC = "adam"
 BETA = 0.01
@@ -41,6 +42,9 @@ TARGET = 0 # Buildings = 0, Roads = 1,
 # ------------------------------------ LOAD DATA ------------------------------------ #
 x_train = np.load(DATA_FOLDER + "x_train_50000.npz")["data"]
 x_test = np.load(DATA_FOLDER + "x_test_5000.npz")["data"]
+
+# x_train = np.load(DATA_FOLDER + "x_train_50000_sharp.npz")["data"]
+# x_test = np.load(DATA_FOLDER + "x_test_5000_sharp.npz")["data"]
 
 y_train = np.load(DATA_FOLDER + "y_train_50000.npz")["label"][:, :, :, TARGET][:, :, :, np.newaxis]
 y_test = np.load(DATA_FOLDER + "y_test_5000.npz")["label"][:, :, :, TARGET][:, :, :, np.newaxis]
@@ -61,18 +65,18 @@ zero_mask_val = y_val.sum(axis=(1, 2, 3)) != 0.0
 y_val_reduced = y_val[zero_mask_val]
 x_val_reduced = x_val[zero_mask_val]
 
-epochs_per_fit = 10
 epochs_discriminator = 5
 fits = [
-    { "epochs": epochs_per_fit, "bs": 64,  "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 72,  "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 80,  "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 88,  "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 96,  "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 104, "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 112, "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 120, "lr": 1e-04},
-    { "epochs": epochs_per_fit, "bs": 128, "lr": 1e-04},
+    { "epochs": 25, "bs":  8,  "lr": 1e-04},
+    { "epochs": 20, "bs": 16,  "lr": 1e-04},
+    { "epochs": 15, "bs": 32,  "lr": 1e-04},
+    { "epochs": 10, "bs": 64,  "lr": 1e-04},
+    { "epochs": 10, "bs": 96,  "lr": 1e-04},
+    { "epochs": 5, "bs": 96,  "lr": 1e-05},
+    { "epochs": 5, "bs": 96,  "lr": 1e-05},
+    { "epochs": 5, "bs": 96,  "lr": 1e-05},
+    { "epochs": 5, "bs": 96,  "lr": 1e-05},
+    { "epochs": 5, "bs": 96,  "lr": 1e-05},
 ]
 
 cur_sum = 0
@@ -97,7 +101,7 @@ model_s2pop.summary()
 
 model_discriminator = create_discriminator(
     model_s2pop.output.shape[1:],
-    activation="swish",
+    activation="relu",
     kernel_initializer="glorot_normal",
     name="discriminator",
     size=64,
@@ -131,8 +135,9 @@ gan_loss.__name__ = "gan_loss"
 def test_loss(y_true, y_pred):
     loss_mse = tf.math.reduce_mean(tf.keras.losses.mean_squared_error(y_true, y_pred))
     loss_gan = gan_loss(y_true, y_pred)
+    loss_f1 = f1_loss(y_true, y_pred)
 
-    return (loss_mse + (loss_gan * 0.0025))
+    return (loss_mse + (loss_gan * 0.0025) + (loss_f1 * 0.0025))
 
 test_loss.__name__ = "test_loss"
 
@@ -140,8 +145,9 @@ test_loss.__name__ = "test_loss"
 def prop(y_true, y_pred):
     loss_mse = tf.math.reduce_mean(tf.keras.losses.mean_squared_error(y_true, y_pred))
     loss_gan = gan_loss(y_true, y_pred)
+    loss_f1 = f1_loss(y_true, y_pred)
 
-    return loss_mse / (loss_mse + (loss_gan * 0.0025))
+    return loss_mse / (loss_mse + (loss_gan * 0.0025) + (loss_f1 * 0.0025))
 
 prop.__name__ = "prop"
 
@@ -153,15 +159,19 @@ model_s2pop.compile(optimizer=OPTIMIZER_PRED, loss=test_loss, metrics=METRICS, j
 model_discriminator.compile(optimizer=OPTIMIZER_DISC, loss="binary_crossentropy", metrics=["accuracy"], jit_compile=COMPILED)
 
 def image_snapshop(epoch, model):
-    img_path = "D:/CFI/predictions/test_images/north-america_0.tif"
-    outname = f"D:/CFI/predictions/{NAME}_{epoch + 1}_pred.tif"
+    images = glob("D:/CFI/predictions/test_images/*.tif")
+    # images = glob("D:/CFI/predictions/test_images/north-america_10.tif")
+    for img in images:
+        img_name = os.path.splitext(os.path.basename(img))[0]
+        
+        if len(img_name.split("_")) > 2:
+            continue
+        
+        arr = beo.raster_to_array(img)[:, :, 1:] # loose scl
+        predicted = predict(model, arr, arr, merge_method="mean")
 
-    print(f"Creating snapshot of model predictions: {outname}")
-
-    arr = beo.raster_to_array(img_path)[:, :, 1:] # loose scl
-    predicted = predict(model, arr, arr)
-
-    beo.array_to_raster(predicted, reference=img_path, out_path=outname)
+        outname = f"D:/CFI/predictions/{NAME}_{img_name}_{epoch + 1}_pred.tif"
+        beo.array_to_raster(predicted, reference=img, out_path=outname)
 
 class PredictCallback(tf.keras.callbacks.Callback):
     def __init__(self):
@@ -171,6 +181,56 @@ class PredictCallback(tf.keras.callbacks.Callback):
         image_snapshop(epoch, self.model)
 
 image_snapshop(-1, model_s2pop)
+
+def batch_generator_train(batchsize):
+    global x_train, y_train
+    patches_len = y_train.shape[0]
+    idx = 0
+
+    while True:
+        x_batch = x_train[idx:idx + batchsize]
+        y_batch = y_train[idx:idx + batchsize]
+
+        # Random rotation
+        rotation = np.random.randint(0, 4)
+        if rotation != 0:
+            x_batch = np.rot90(x_batch, axes=(1, 2))
+            y_batch = np.rot90(y_batch, axes=(1, 2))
+
+        # Random flips
+        flips =  np.random.randint(0, 4)
+        if flips == 3:
+            x_batch = np.flip(x_batch, axis=(1, 2))
+            y_batch = np.flip(y_batch, axis=(1, 2))
+        elif flips == 2:
+            x_batch = np.flip(x_batch, axis=(2))
+            y_batch = np.flip(y_batch, axis=(2))
+        elif flips == 1:
+            x_batch = np.flip(x_batch, axis=(1))
+            y_batch = np.flip(y_batch, axis=(1))
+        else:
+            pass
+
+        # Normal noise
+        if np.random.randint(0, 2) == 1:
+            noise = np.random.normal(0, 0.001, x_batch.shape)
+            x_batch += noise
+
+        # Random scale
+        if np.random.randint(0, 2) == 1:
+            scale = np.random.normal(0, 0.005)
+            x_batch += scale
+            x_batch = np.clip(x_batch, 0.0, 2.0)
+
+        yield x_batch, y_batch
+
+        idx = idx + batchsize
+
+        if idx + batchsize > patches_len:
+            idx = 0
+            mask = np.random.permutation(len(y_train))
+            x_train = x_train[mask]
+            y_train = y_train[mask]
         
 # ------------------------------------ START LOOP ------------------------------------------- #
 for idx, fit in enumerate(fits):
@@ -181,22 +241,24 @@ for idx, fit in enumerate(fits):
 
     model_s2pop.optimizer.lr.assign(use_lr)
 
-    mask_disc = np.random.permutation(x_train.shape[0])
-    x_train = x_train[mask_disc]
-    y_train = y_train[mask_disc]
+    # mask_disc = np.random.permutation(x_train.shape[0])
+    # x_train = x_train[mask_disc]
+    # y_train = y_train[mask_disc]
 
     callbacks = [OverfitProtection(patience=3, difference=0.20, offset_start=3)]
     if PREDICT_CALLBACK:
         callbacks.append(PredictCallback())
 
     model_s2pop.fit(
-        x=x_train,
-        y=y_train,
+        x=batch_generator_train(use_bs),
+        # x=x_train,
+        # y=y_train,
         validation_data=(x_val, y_val),
         shuffle=True,
         epochs=use_epoch + use_ie,
         initial_epoch=use_ie,
         batch_size=use_bs,
+        steps_per_epoch=int(y_train.shape[0] / use_bs),
         validation_batch_size=VAL_BS,
         use_multiprocessing=True,
         workers=0,

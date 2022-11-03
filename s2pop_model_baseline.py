@@ -1,6 +1,7 @@
 import tensorflow as tf
 from utils import InceptionConvBlock, ReductionBlock, ExpansionBlock, SqueezeBlock
 
+
 def create_model(
     input_shape,
     activation="swish",
@@ -10,7 +11,6 @@ def create_model(
     size=64,
     depth=1,
     squeeze_ratio=8,
-    cardinality=4,
     squeeze=False,
     dense_core=True,
 ):
@@ -66,8 +66,9 @@ def create_model(
     # 8 x 8
     if dense_core:
         flatten = tf.keras.layers.Flatten()(redu)
-        dense_core = tf.keras.layers.Dense(units=8 * 8 * SIZE_LARGE, activation=activation, kernel_initializer=kernel_initializer)(flatten)
-        conv = tf.keras.layers.Reshape((8, 8, SIZE_LARGE))(dense_core)
+        dense_core = tf.keras.layers.Dense(units=8 * 8 * 8, activation=activation, kernel_initializer=kernel_initializer)(flatten)
+        conv = tf.keras.layers.Reshape((8, 8, 8))(dense_core)
+        conv = InceptionConvBlock(conv, filters=SIZE_LARGE, residual=False, activation=activation, kernel_initializer=kernel_initializer)
     else:
         conv = InceptionConvBlock(redu, filters=SIZE_LARGE, residual=False, activation=activation, kernel_initializer=kernel_initializer)
 
