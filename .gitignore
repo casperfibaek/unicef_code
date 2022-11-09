@@ -129,3 +129,5 @@ dmypy.json
 .pyre/
 small_dataset.npz
 gifs/*
+*/**.mp4
+*.mp4

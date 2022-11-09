@@ -42,7 +42,7 @@ DIVISIONS = 10
 DPI = 130
 HEIGHT = 1000
 WIDTH = 1000
-LIMIT = 51
+LIMIT = 101
 PRERUN = 3
 FADE = 3
 TEXT_COLOR = "#BBBBBB"
@@ -77,7 +77,7 @@ for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80
     rgb_image = np.clip(rgb_image[:, :, ::-1], q02, q99)
     rgb_image = (rgb_image - q02) / (q99 - q02)
 
-    img1 = ready_image(f"/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v17_north-america_{fig_nr}_*.tif", divisions=DIVISIONS, limit=LIMIT)
+    img1 = ready_image(f"/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v20_north-america_{fig_nr}_*.tif", divisions=DIVISIONS, limit=LIMIT)
     preruns = [rgb_image] * DIVISIONS * PRERUN
     
     interpolated = np.linspace(rgb_image, np.zeros_like(rgb_image), DIVISIONS * FADE, axis=0)
@@ -113,4 +113,4 @@ for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80
         return [im1, time_text]
 
     anim = animation.FuncAnimation(fig, updatefig, frames=range(len(img1) + len(preruns)), interval=30, blit=True)
-    anim.save(f"/home/casper/Desktop/UNICEF/animation_{places[idx]['name_abr']}.mp4", writer=animation.FFMpegWriter(fps=30, bitrate=1000000))
+    anim.save(f"/home/casper/Desktop/UNICEF/animation-v31_{places[idx]['name_abr']}.mp4", writer=animation.FFMpegWriter(fps=30, bitrate=1000000))

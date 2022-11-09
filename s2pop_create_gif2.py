@@ -42,7 +42,7 @@ DIVISIONS = 10
 DPI = 130
 HEIGHT = 1000
 WIDTH = 1000
-LIMIT = 51
+LIMIT = 101
 PRERUN = 3
 TEXT_COLOR = "#BBBBBB"
 IMG_RAMP = "magma"
@@ -61,6 +61,9 @@ places = [
 ]
 
 for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80", "90"]):
+    if fig_nr == "0" or fig_nr == "10":
+        continue
+
     fig = plt.figure(figsize=(HEIGHT / DPI, WIDTH / DPI), dpi=DPI, frameon=False)
     ax = plt.Axes(fig, [0., 0., 1., 1.])
     ax.set_axis_off()
@@ -76,7 +79,7 @@ for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80
     rgb_image = np.clip(rgb_image[:, :, ::-1], q02, q99)
     rgb_image = (rgb_image - q02) / (q99 - q02)
 
-    img1 = ready_image(f"/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v17_north-america_{fig_nr}_*.tif", divisions=DIVISIONS, limit=LIMIT)
+    img1 = ready_image(f"/home/casper/Desktop/UNICEF/gifs/s2pop_gan_v20_north-america_{fig_nr}_*.tif", divisions=DIVISIONS, limit=LIMIT)
     
     im1 = ax.imshow(rgb_image, vmin=0.0, vmax=1.0, interpolation="antialiased")
     im2 = ax.imshow(img1[0], vmin=0.0, vmax=1.0, interpolation="antialiased", cmap=IMG_RAMP, alpha=np.zeros_like(img1[0]))
@@ -98,7 +101,7 @@ for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80
                 im1.set_data(np.clip(rgb_image * prop, 0.0, 1.0))
 
                 im2.set_data(img1[i])
-                im2.set_alpha(np.clip(img1[i] + (i / len(img1) * 1.2), 0.0, 1.0))
+                im2.set_alpha(np.clip(img1[i] + (i / len(img1) * 1.333), 0.0, 1.0))
                 time_text.set_text(str(round(times[j], 1)))
             except:
                 time_text.set_text(str(round(times[-1], 1)))
@@ -107,4 +110,4 @@ for idx, fig_nr in enumerate(["0", "10", "20", "30", "40", "50", "60", "70", "80
         return [im1, im2]
 
     anim = animation.FuncAnimation(fig, updatefig, frames=range(len(times)), interval=30, blit=True)
-    anim.save(f"/home/casper/Desktop/UNICEF/animation_v2_{places[idx]['name_abr']}.mp4", writer=animation.FFMpegWriter(fps=30, bitrate=1000000))
+    anim.save(f"/home/casper/Desktop/UNICEF/animation-v32_{places[idx]['name_abr']}.mp4", writer=animation.FFMpegWriter(fps=30, bitrate=1000000))
